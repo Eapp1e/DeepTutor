@@ -16,6 +16,7 @@ from typing import Any
 import unicodedata
 
 from deeptutor.services.parsing.cache import source_hash_from_path
+from deeptutor.services.rag.source_pages import SOURCE_SCHEMA_VERSION, source_digest
 
 MAX_QUESTIONS = 30
 MAX_CONTENT = 24000
@@ -262,16 +263,34 @@ def _parse_for(source: Path, cache_root: Path) -> Path | None:
     return None
 
 
-def lookup_exercises(query: str, kb_dir: Path, cache_root: Path) -> dict[str, Any] | None:
+def lookup_exercises(
+    query: str,
+    kb_dir: Path,
+    cache_root: Path,
+    document_keys: list[str] | None = None,
+) -> dict[str, Any] | None:
     """Return exact candidates from ready PDF parses, or allow normal retrieval.
 
     Sources must belong to the selected KB. Missing structured parses return
     ``None``; supported parses report each number as found, ambiguous or absent.
+    ``document_keys`` narrows the lookup to the same raw documents the caller
+    selected, so a scoped query never reads a file it did not ask for.
     No parse, index, embedding or settings files are created or modified.
     """
     keys, kind = requested_exercises(query)
     if not keys:
         return None
+    if document_keys is not None and not document_keys:
+        # An empty selection stays empty instead of widening to the whole KB.
+        return {
+            "query": query,
+            "answer": "",
+            "content": "",
+            "sources": [],
+            "provider": "llamaindex",
+            "retrieval_method": "exercise_exact",
+            "exercise_status": [],
+        }
     if len(keys) > MAX_QUESTIONS:
         content = f"本次包含 {len(keys)} 个题号，请分批检索，每批不超过 {MAX_QUESTIONS} 题，以免遗漏题干。"
         return {
@@ -288,6 +307,9 @@ def lookup_exercises(query: str, kb_dir: Path, cache_root: Path) -> dict[str, An
     raw = kb_dir / "raw"
     for source in sorted(raw.glob("*.pdf")):
         if not source.resolve().is_relative_to(raw.resolve()):
+            continue
+        document_key = source.resolve().relative_to(raw.resolve()).as_posix()
+        if document_keys is not None and document_key not in document_keys:
             continue
         try:
             parsed = _parse_for(source, cache_root)
@@ -348,6 +370,7 @@ def lookup_exercises(query: str, kb_dir: Path, cache_root: Path) -> dict[str, An
                     f"{source}:{key}:{exercise.kind}:{exercise.ordinal}".encode()
                 ).hexdigest()[:20]
             )
+            source_key = source.resolve().relative_to(raw.resolve()).as_posix()
             sources.append(
                 {
                     "title": title,
@@ -359,6 +382,12 @@ def lookup_exercises(query: str, kb_dir: Path, cache_root: Path) -> dict[str, An
                     "question_number": label,
                     "exercise_kind": exercise.kind,
                     "requires_page_review": exercise.images,
+                    "document_key": source_key,
+                    "source_digest": source_digest(source),
+                    "source_schema_version": SOURCE_SCHEMA_VERSION,
+                    "page_index": min(pages) - 1 if pages else None,
+                    "page_label": page_label,
+                    "evidence_text": text[:2000],
                 }
             )
     content = "\n\n".join(parts)

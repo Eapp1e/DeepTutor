@@ -12,6 +12,7 @@ from deeptutor.services.rag.pipelines.llamaindex.exercise_lookup import (
     lookup_exercises,
     requested_exercises,
 )
+from deeptutor.services.rag.source_pages import SOURCE_SCHEMA_VERSION
 
 
 def text(s, page=1, **kwargs):
@@ -133,6 +134,65 @@ class ExerciseLookupTests(unittest.TestCase):
         )
         self.assertEqual(found[0].parts, ["2-18 本题内容"])
 
+    def test_document_keys_keep_the_selection_and_page_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kb = root / "knowledge_bases" / "one"
+            raw = kb / "raw"
+            raw.mkdir(parents=True)
+            cache = root / "parse_cache"
+            for name in ("selected.pdf", "unselected.pdf"):
+                source = raw / name
+                source.write_bytes(f"fake pdf {name}".encode())
+                st = source.stat()
+                digest = _source_hash(str(source), st.st_mtime_ns, st.st_size)
+                folder = cache / digest[:2] / digest / "sig"
+                folder.mkdir(parents=True)
+                (folder / "full_content_list.json").write_text(
+                    json.dumps(
+                        [
+                            text("第二章 磁场"),
+                            text("习题"),
+                            text(f"2-13 来自 {name}"),
+                        ]
+                    )
+                )
+                (folder / "manifest.json").write_text(json.dumps({"source_hash": digest}))
+            scoped = lookup_exercises("习题2-13", kb, cache, document_keys=["selected.pdf"])
+            self.assertEqual([Path(s["source"]).name for s in scoped["sources"]], ["selected.pdf"])
+            self.assertIn("selected.pdf", scoped["content"])
+            self.assertNotIn("unselected.pdf", scoped["content"])
+            entry = scoped["sources"][0]
+            self.assertEqual(entry["document_key"], "selected.pdf")
+            self.assertEqual(entry["page_index"], 0)
+            self.assertEqual(entry["source_schema_version"], SOURCE_SCHEMA_VERSION)
+            self.assertTrue(entry["source_digest"])
+            self.assertEqual(entry["evidence_text"], "2-13 来自 selected.pdf")
+            unscoped = lookup_exercises("习题2-13", kb, cache)
+            self.assertEqual(len(unscoped["sources"]), 2)
+
+    def test_empty_document_keys_return_no_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kb = root / "knowledge_bases" / "one"
+            raw = kb / "raw"
+            raw.mkdir(parents=True)
+            source = raw / "book.pdf"
+            source.write_bytes(b"fake pdf for hash")
+            st = source.stat()
+            digest = _source_hash(str(source), st.st_mtime_ns, st.st_size)
+            cache = root / "parse_cache"
+            folder = cache / digest[:2] / digest / "sig"
+            folder.mkdir(parents=True)
+            (folder / "full_content_list.json").write_text(
+                json.dumps([text("第二章 磁场"), text("习题"), text("2-13 球面")])
+            )
+            (folder / "manifest.json").write_text(json.dumps({"source_hash": digest}))
+            empty = lookup_exercises("习题2-13", kb, cache, document_keys=[])
+            self.assertEqual(empty["sources"], [])
+            self.assertEqual(empty["exercise_status"], [])
+            self.assertEqual(empty["retrieval_method"], "exercise_exact")
+
     def test_cache_scope_incomplete_parse_and_missing_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -223,6 +283,26 @@ class PipelineRoutingTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     result = await p.search("习题2-13", "kb", top_k=1)
             self.assertEqual(result, expected)
+
+    async def test_exact_lookup_receives_the_document_scope(self):
+        from deeptutor.services.rag.pipelines.llamaindex.pipeline import LlamaIndexPipeline
+
+        expected = {
+            "content": "scoped",
+            "sources": [],
+            "retrieval_method": "exercise_exact",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "kb").mkdir()
+            p = LlamaIndexPipeline(kb_base_dir=tmp)
+            with patch(
+                "deeptutor.services.rag.pipelines.llamaindex.exercise_lookup.lookup_exercises",
+                return_value=expected,
+            ) as lookup:
+                self.assertEqual(
+                    await p.search("习题2-13", "kb", document_keys=["selected.pdf"]), expected
+                )
+            self.assertEqual(lookup.call_args.args[-1], ["selected.pdf"])
 
     async def test_concept_queries_keep_existing_retrieval(self):
         from deeptutor.services.rag.pipelines.llamaindex.pipeline import LlamaIndexPipeline

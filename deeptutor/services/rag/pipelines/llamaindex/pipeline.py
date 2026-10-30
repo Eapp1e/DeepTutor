@@ -323,7 +323,11 @@ class LlamaIndexPipeline:
             kb_dir = resolve_kb_dir(self.kb_base_dir, kb_name)
             try:
                 exact = await asyncio.to_thread(
-                    lookup_exercises, query, kb_dir, Path(self.kb_base_dir).parent / "parse_cache"
+                    lookup_exercises,
+                    query,
+                    kb_dir,
+                    Path(self.kb_base_dir).parent / "parse_cache",
+                    kwargs.get("document_keys"),
                 )
             except Exception:
                 self.logger.exception("Exercise lookup unavailable; using normal retrieval")
